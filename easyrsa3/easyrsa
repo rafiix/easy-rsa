@@ -78,6 +78,7 @@ DIRECTORY STATUS (commands would take effect on these locations)
 # 'case' indentation is minimalistic.
 cmd_help() {
 	text=""
+	err_text=""
 	opts=""
 	case "$1" in
 	init-pki|clean-all)
@@ -375,29 +376,33 @@ cmd_help() {
       * IP:203.0.113.29
       * email:alternate@example.net"
 	;;
-	options)
+	opts|options)
 		opt_usage
 	;;
 	"")
 		usage ;;
 	*)
-		text="
+		err_text="
   Unknown command: '$1' (try without commands for a list of commands)"
 	esac
 
 	# display the help text
 	[ "$text" ] && print "${text}${NL}"
-	if [ "$opts" ]; then
+	if [ "$text" ] && [ "$opts" ]; then
 		print "\
     Available command-options (cmd-opts):
 $opts
 "
-	else
+	elif [ "$text" ] && [ -z "$opts" ]; then
 		print "\
     Available command-options (cmd-opts):
 
       * N/A - No supported command-options
 "
+	elif [ "$err_text" ]; then
+		print "${err_text}${NL}"
+	else
+		: # ok - No opts message required
 	fi
 } # => cmd_help()
 
@@ -431,12 +436,6 @@ General options:
 Certificate & Request options: (these impact cert/req field values)
 
 --days=#        : sets the signing validity to the specified number of days
---renew-days=#  : Number of days grace period before allowing renewal
---fix-offset=#  : Generate certificate with fixed start and end dates.
-                : Range 1 to 365
-                : start date: 01 January 00:00:00 of the current year
-                : end date:   off-set days 01:00:00 of the final year
-				: Final year is configured via --days (Default: 825 days, 2 years)
 
 --digest=ALG    : digest to use in the requests & certificates
 --dn-mode=MODE  : DN mode to use (cn_only or org)
@@ -465,6 +464,16 @@ Deprecated features:
 --ns-cert=YES/NO      : yes or no to including deprecated NS extensions
 --ns-comment=COMMENT  : NS comment to include (value may be blank)
 "
+
+: << OLD_OPTS
+--renew-days=#  : Number of days grace period before allowing renewal
+--fix-offset=#  : Generate certificate with fixed start and end dates.
+                : Range 1 to 365
+                : start date: 01 January 00:00:00 of the current year
+                : end date:   off-set days 01:00:00 of the final year
+				: Final year is configured via --days (Default: 825 days, 2 years)
+OLD_OPTS
+
 } # => opt_usage()
 
 # Wrapper around printf - clobber print since it's not POSIX anyway
@@ -480,9 +489,7 @@ Easy-RSA error:
 
 $1" 1>&2
 
-	print "
-$host_out${EASYRSA_DEBUG+
-*** Disable EASYRSA_DEBUG mode ***}"
+	show_host
 
 	exit "${2:-1}"
 } # => die()
@@ -638,7 +645,7 @@ cleanup() {
 		exit 0
 	else
 		# if 'cleanup' is called without 'ok' then an error occurred
-		[ "$EASYRSA_SILENT" ] || echo "" # just to get a clean line
+		[ "$EASYRSA_SILENT" ] || print # just to get a clean line
 		exit 1
 	fi
 } # => cleanup()
@@ -651,41 +658,33 @@ make_safe_ssl_copy() {
 	easyrsa_openssl makesafeconf
 } # => make_safe_ssl_copy()
 
-# 'sed' behavior with '&' is not modifiable, so auto escape '&'
-# shellcheck disable=SC2295 # Expansions inside ${..} need to be quoted ..
-escape_char() {
-	bad_char="$1"
-	in_str="$2"
-	shift 2 || die "escape_borken_char - input"
-	part_full_rhs="$in_str"
-	part_head=""
-	part_next=""
-	part_temp=""
-	esc_char=\\
+# Escape hazardous characters
+escape_hazard() {
+	# escape '&' and '$' and write free form fields to org temp-file
+	( # subshell for local debug
+		# debug log on
+		if [ "$EASYRSA_DEBUG" ]; then print "<< DEBUG-ON >>"; set -x; fi
+		print "\
+export EASYRSA_REQ_COUNTRY=\"$EASYRSA_REQ_COUNTRY\"
+export EASYRSA_REQ_PROVINCE=\"$EASYRSA_REQ_PROVINCE\"
+export EASYRSA_REQ_CITY=\"$EASYRSA_REQ_CITY\"
+export EASYRSA_REQ_ORG=\"$EASYRSA_REQ_ORG\"
+export EASYRSA_REQ_OU=\"$EASYRSA_REQ_OU\"
+export EASYRSA_REQ_EMAIL=\"$EASYRSA_REQ_EMAIL\"
+" | sed		-e s\`'&'\`'\\\&'\`g \
+			-e s\`'\$'\`'\\\$'\`g > "$easyrsa_openssl_conf_org" || \
+				die "Failed to write 'easyrsa_openssl_conf_org' temp file"
+		# debug log off
+		if [ "$EASYRSA_DEBUG" ]; then set +x; print ">> DEBUG-OFF <<"; fi
+	) # Close subshell
 
-	part_head="${in_str%%${bad_char}*}" # Drop RHS
-	if [ "$part_head" = "$in_str" ]; then
-		# ok - No borken chars found
-		out_str="${part_head}"
-	else
-		part_head="${part_head}${esc_char}${bad_char}" # Insert ESC+char
-		while [ "$part_full_rhs" ]; do
-			part_full_rhs="${part_full_rhs#*${bad_char}}" # Drop LHS
-			part_next="${part_full_rhs%%${bad_char}*}" # Drop RHS
+	# Reload fields from fully escaped org temp-file
+	# shellcheck disable=SC1090 # can't follow non-constant source.
+	. "$easyrsa_openssl_conf_org" || die "escape_hazard - Failed to source 'org'"
 
-			if [ "$part_next" = "$part_full_rhs" ]; then
-				# ok - No borken chars found
-				part_full_rhs=""
-				part_temp="${part_temp}${part_next}"
-			else
-				part_full_rhs="${part_full_rhs#*${bad_char}}" # Drop LHS
-				part_next="${part_next}${esc_char}${bad_char}" # Insert ESC+char
-				part_temp="${part_temp}${part_next}"
-			fi
-		done
-		out_str="${part_head}${part_temp}"
-	fi
-} # => escape_char()
+	# Clean up
+	rm -f "$easyrsa_openssl_conf_org"
+} # => escape_hazard()
 
 # Easy-RSA meta-wrapper for SSL
 easyrsa_openssl() {
@@ -713,51 +712,40 @@ easyrsa_openssl() {
 		if [ "$no_pki_required" ]; then
 			# for init-pki $EASYRSA_SAFE_CONF is always set in the PKI, use it.
 			easyrsa_openssl_conf="${EASYRSA_SAFE_CONF}.init-tmp"
+			easyrsa_openssl_conf_org="${EASYRSA_SAFE_CONF}.org"
 		else
 			easyrsa_openssl_conf="$(easyrsa_mktemp)" || \
-				die "easyrsa_openssl - Failed to create temporary file"
+				die "easyrsa_openssl - Failed to create temporary file (1)"
+			easyrsa_openssl_conf_org="$(easyrsa_mktemp)" || \
+				die "easyrsa_openssl - Failed to create temporary file (2)"
 		fi
 
-		# escape borken chars: '&'
-		escape_char '&' "$EASYRSA_REQ_PROVINCE"
-		EASYRSA_REQ_PROVINCE_esc="$out_str"
-		escape_char '&' "$EASYRSA_REQ_CITY"
-		EASYRSA_REQ_CITY_esc="$out_str"
-		escape_char '&' "$EASYRSA_REQ_ORG"
-		EASYRSA_REQ_ORG_esc="$out_str"
-		escape_char '&' "$EASYRSA_REQ_EMAIL"
-		EASYRSA_REQ_EMAIL_esc="$out_str"
-		escape_char '&' "$EASYRSA_REQ_OU"
-		EASYRSA_REQ_OU_esc="$out_str"
+		# Auto-escape hazardous characters:
+		# '&' - Workaround 'sed' demented behavior
+		escape_hazard
 
-		# OpenSSL does not require a safe config, so skip to the copy
-		# require_safe_ssl_conf is set by verify_ssl_lib()
-		# OpenSSL cannot handle unescaped ampersand, so this is ALWAYS enabled
+		# require_safe_ssl_conf is ALWAYS set by verify_ssl_lib()
 		if [ "$require_safe_ssl_conf" ]; then
-			# Make a safe SSL config file
-			# First line: replace 'ENV::EASYRSA' with 'EASYRSA'
-			# Result: '$ENV::EASYRSA_PKI' -> '$EASYRSA_PKI'
-			# Now replace '$EASYRSA_PKI' with expansion
-			#	-e s\`ENV::EASYRSA\`EASYRSA\`g \
 
+			# Make a safe SSL config file
 			# shellcheck disable=SC2016 # No expansion inside ' single quote
 			sed \
-			-e s\`'$dir'\`"$EASYRSA_PKI"\`g \
-			-e s\`'$ENV::EASYRSA_PKI'\`"$EASYRSA_PKI"\`g \
-			-e s\`'$ENV::EASYRSA_CERT_EXPIRE'\`"$EASYRSA_CERT_EXPIRE"\`g \
-			-e s\`'$ENV::EASYRSA_CRL_DAYS'\`"$EASYRSA_CRL_DAYS"\`g \
-			-e s\`'$ENV::EASYRSA_DIGEST'\`"$EASYRSA_DIGEST"\`g \
-			-e s\`'$ENV::EASYRSA_KEY_SIZE'\`"$EASYRSA_KEY_SIZE"\`g \
-			-e s\`'$ENV::EASYRSA_DN'\`"$EASYRSA_DN"\`g \
-			-e s\`'$ENV::EASYRSA_REQ_COUNTRY'\`"$EASYRSA_REQ_COUNTRY"\`g \
-			-e s\`'$ENV::EASYRSA_REQ_PROVINCE'\`"$EASYRSA_REQ_PROVINCE_esc"\`g \
-			-e s\`'$ENV::EASYRSA_REQ_CITY'\`"$EASYRSA_REQ_CITY_esc"\`g \
-			-e s\`'$ENV::EASYRSA_REQ_ORG'\`"$EASYRSA_REQ_ORG_esc"\`g \
-			-e s\`'$ENV::EASYRSA_REQ_OU'\`"$EASYRSA_REQ_OU_esc"\`g \
-			-e s\`'$ENV::EASYRSA_REQ_CN'\`"$EASYRSA_REQ_CN"\`g \
-			-e s\`'$ENV::EASYRSA_REQ_EMAIL'\`"$EASYRSA_REQ_EMAIL_esc"\`g \
+			-e s\`'$dir'\`\""$EASYRSA_PKI"\"\`g \
+			-e s\`'$ENV::EASYRSA_PKI'\`\""$EASYRSA_PKI"\"\`g \
+			-e s\`'$ENV::EASYRSA_CERT_EXPIRE'\`\""$EASYRSA_CERT_EXPIRE"\"\`g \
+			-e s\`'$ENV::EASYRSA_CRL_DAYS'\`\""$EASYRSA_CRL_DAYS"\"\`g \
+			-e s\`'$ENV::EASYRSA_DIGEST'\`\""$EASYRSA_DIGEST"\"\`g \
+			-e s\`'$ENV::EASYRSA_KEY_SIZE'\`\""$EASYRSA_KEY_SIZE"\"\`g \
+			-e s\`'$ENV::EASYRSA_DN'\`\""$EASYRSA_DN"\"\`g \
+			-e s\`'$ENV::EASYRSA_REQ_CN'\`\""$EASYRSA_REQ_CN"\"\`g \
+			-e s\`'$ENV::EASYRSA_REQ_COUNTRY'\`\""$EASYRSA_REQ_COUNTRY"\"\`g \
+			-e s\`'$ENV::EASYRSA_REQ_PROVINCE'\`\""$EASYRSA_REQ_PROVINCE"\"\`g \
+			-e s\`'$ENV::EASYRSA_REQ_CITY'\`\""$EASYRSA_REQ_CITY"\"\`g \
+			-e s\`'$ENV::EASYRSA_REQ_ORG'\`\""$EASYRSA_REQ_ORG"\"\`g \
+			-e s\`'$ENV::EASYRSA_REQ_OU'\`\""$EASYRSA_REQ_OU"\"\`g \
+			-e s\`'$ENV::EASYRSA_REQ_EMAIL'\`\""$EASYRSA_REQ_EMAIL"\"\`g \
 				"$EASYRSA_SSL_CONF" > "$easyrsa_openssl_conf" || \
-					die "easyrsa_openssl - Failed to make temporary config"
+					die "easyrsa_openssl - Failed to make temporary config (1)"
 
 		else
 			# Do NOT Make a safe SSL config file
@@ -770,39 +758,42 @@ easyrsa_openssl() {
 			mv -f "$easyrsa_openssl_conf" "$EASYRSA_SAFE_CONF" || \
 				die "easyrsa_openssl - makesafeconf failed"
 			if [ "$make_copy_ssl_conf" ]; then
-				cp "$EASYRSA_SAFE_CONF" "${EASYRSA_SAFE_CONF}.copy"
+				print
+				cp -v "$EASYRSA_SAFE_CONF" "${EASYRSA_SAFE_CONF}.temp"
+				print
 			fi
 		else
 			# debug log on
-			if [ "$EASYRSA_DEBUG" ]; then set -x; fi
+			if [ "$EASYRSA_DEBUG" ]; then print "<< DEBUG-ON >>"; set -x; fi
 
 			# Exec SSL with -config temp-file
 			"$EASYRSA_OPENSSL" "$openssl_command" \
 				-config "$easyrsa_openssl_conf" "$@" || return
 
 			# debug log off
-			if [ "$EASYRSA_DEBUG" ]; then set +x; fi
+			if [ "$EASYRSA_DEBUG" ]; then set +x; print ">> DEBUG-OFF <<"; fi
 		fi
 	else
 		# debug log on
-		if [ "$EASYRSA_DEBUG" ]; then set -x; fi
+		if [ "$EASYRSA_DEBUG" ]; then print "<< DEBUG-ON >>"; set -x; fi
 
 		# Exec SSL without -config temp-file
 		"$EASYRSA_OPENSSL" "$openssl_command" "$@" || return
 
 		# debug log off
-		if [ "$EASYRSA_DEBUG" ]; then set +x; fi
+		if [ "$EASYRSA_DEBUG" ]; then set +x; print ">> DEBUG-OFF <<"; fi
 	fi
 } # => easyrsa_openssl()
 
 # Verify the SSL library is functional and establish version dependencies
 verify_ssl_lib() {
 	if [ -z "$EASYRSA_SSL_OK" ]; then
-		val="$("$EASYRSA_OPENSSL" version)"
+		# redirect std-err to ignore missing etc/ssl/openssl.cnf file
+		val="$("$EASYRSA_OPENSSL" version 2>/dev/null)"
 		case "${val%% *}" in
 			# OpenSSL does require a safe config-file for ampersand
-			OpenSSL) require_safe_ssl_conf=1 ;;
-			LibreSSL) require_safe_ssl_conf=1 ;;
+			OpenSSL) ssl_lib=openssl; require_safe_ssl_conf=1 ;;
+			LibreSSL) ssl_lib=libressl; require_safe_ssl_conf=1 ;;
 			*) die "\
 Missing or invalid OpenSSL
 Expected to find openssl command at: $EASYRSA_OPENSSL"
@@ -819,12 +810,14 @@ Expected to find openssl command at: $EASYRSA_OPENSSL"
 		esac
 		message "Using SSL: $EASYRSA_OPENSSL ${val}"
 		EASYRSA_SSL_OK=1
-	fi
 
-	# Verify EASYRSA_SSL_CONF file exists
-	[ -f "$EASYRSA_SSL_CONF" ] || die "\
+		# Verify EASYRSA_SSL_CONF file exists
+		[ -f "$EASYRSA_SSL_CONF" ] || die "\
 The OpenSSL config file cannot be found.
 Expected location: $EASYRSA_SSL_CONF"
+	else
+		die "verify_ssl_lib - Overloaded"
+	fi
 } # => verify_ssl_lib()
 
 # Basic sanity-check of PKI init and complain if missing
@@ -847,9 +840,6 @@ $help_note"
 Missing expected directory: $i (perhaps you need to run init-pki?)
 $help_note"
 	done
-
-	# verify ssl lib
-	verify_ssl_lib
 	unset -v help_note
 } # => verify_pki_init()
 
@@ -995,6 +985,9 @@ install_data_to_pki () {
 #
 # Copying 'vars' to the PKI is complicated, code is included but DISABLED.
 
+	# debug log on
+	if [ "$EASYRSA_DEBUG" ]; then print ">> DEBUG-ON <<"; set -x; fi
+
 	context="$1"
 	shift
 
@@ -1012,11 +1005,11 @@ install_data_to_pki () {
 
 	# Find and copy data-files, in specific order
 	for area in \
-		"$PWD" \
-		"${0%/*}" \
 		'/etc/easy-rsa' \
 		'/usr/share/easy-rsa' \
 		'/usr/local/share/easy-rsa' \
+		"$PWD" \
+		"${0%/*}" \
 		# EOL - # Add more distros here
 	do
 		# Omitting "$vars_file"
@@ -1092,7 +1085,12 @@ install_data_to_pki () {
 		die "x509-types folder cannot be found: $EASYRSA_EXT_DIR"
 
 	# Complete or error
-	[ -e "$EASYRSA_SAFE_CONF" ] || easyrsa_openssl makesafeconf
+	require_safe_ssl_conf=1 # Always required
+	[ -e "$EASYRSA_SAFE_CONF" ] || easyrsa_openssl makesafeconf || return
+
+	# debug log OFF
+	if [ "$EASYRSA_DEBUG" ]; then set +x; print ">> DEBUG-OFF <<"; fi
+
 } # => install_data_to_pki ()
 
 # Disable terminal echo, if possible, otherwise warn
@@ -1433,9 +1431,6 @@ sign_req() {
 	req_in="$EASYRSA_PKI/reqs/$2.req"
 	crt_out="$EASYRSA_PKI/issued/$2.crt"
 
-	# Get fixed dates by --fix-offset
-	cert_dates
-
 	# Randomize Serial number
 	if [ "$EASYRSA_RAND_SN" != "no" ]; then
 		i=""
@@ -1497,6 +1492,19 @@ Request subject, to be signed as a $crt_type certificate for $EASYRSA_CERT_EXPIR
 
 $(display_dn req "$req_in")
 "	# => confirm end
+
+	# Get fixed dates by --fix-offset
+	if [ "$EASYRSA_FIX_OFFSET" ]; then
+		fixed_dates="$( # subshell for debug
+			[ "$EASYRSA_DEBUG" ] && set -x
+			fixed_cert_dates "$EASYRSA_FIX_OFFSET"
+		)" # Close subshell
+		start_fixdate="${fixed_dates% *}"
+		end_fixdate="${fixed_dates#* }"
+		unset -v fixed_dates
+	else
+		unset -v start_fixdate end_fixdate
+	fi
 
 	# When EASYRSA_CP_EXT is defined, adjust openssl's [default_ca] section:
 	if [ "$EASYRSA_CP_EXT" ]; then
@@ -1571,8 +1579,8 @@ $ext_tmp"
 	easyrsa_openssl ca -utf8 -in "$req_in" -out "$crt_out_tmp" \
 		-extfile "$ext_tmp" -days "$EASYRSA_CERT_EXPIRE" -batch \
 		${EASYRSA_PASSIN:+-passin "$EASYRSA_PASSIN"} \
-		${EASYRSA_FIX_OFFSET:+ -startdate "$start_fixdate"} \
-		${EASYRSA_FIX_OFFSET:+ -enddate "$end_fixdate"} \
+		${EASYRSA_FIX_OFFSET+ -startdate "$start_fixdate"} \
+		${EASYRSA_FIX_OFFSET+ -enddate "$end_fixdate"} \
 			|| die "signing failed (openssl output above may have more detail)"
 
 	mv "$crt_out_tmp" "$crt_out"
@@ -1627,10 +1635,12 @@ Matching file found at: "
 	gen_req "$name" batch ${nopass+ nopass}
 
 	# Sign it
-	( sign_req "$crt_type" "$name" batch ) || {
+	if sign_req "$crt_type" "$name" batch; then
+		: # ok
+	else
 		rm -f "$req_out" "$key_out"
 		die "Failed to sign '$name' - See error messages above for details."
-	}
+	fi
 
 	# inline it
 	if [ "$EASYRSA_INLINE" ]; then
@@ -1772,7 +1782,8 @@ with the following subject:
   $(display_dn x509 "$crt_in")
 
   serial-number: $cert_serial
-"	# => confirm end
+
+  Reason: ${crl_reason-None given}"
 
 	# Revoke certificate
 	easyrsa_openssl ca -utf8 -revoke "$crt_in" \
@@ -1922,12 +1933,12 @@ Cannot renew this certificate because a conflicting file exists.
 	[ -e "$req_out" ] && die "$deny_msg request    : $req_out"
 	unset -v deny_msg
 
-	# Check if old cert is expired or expires within 30
-	cert_dates "$crt_in"
-
-	[ "$expire_date_s" -lt "$allow_renew_date_s" ] || die "\
-Certificate expires in more than $EASYRSA_CERT_RENEW days.
-Renewal not allowed."
+	#	# Check if old cert is expired or expires within 30
+	#	cert_dates "$crt_in"
+	#
+	#	[ "$expire_date_s" -lt "$allow_renew_date_s" ] || die "\
+	#Certificate expires in more than $EASYRSA_CERT_RENEW days.
+	#Renewal not allowed."
 
 	# Extract certificate usage from old cert
 	cert_ext_key_usage="$(
@@ -1982,8 +1993,7 @@ with the following subject:
 
   $(display_dn x509 "$crt_in")
 
-  serial-number: $cert_serial
-"	# => confirm end
+  serial-number: $cert_serial"
 
 	# move renewed files so we can reissue certificate with the same name
 	renew_move
@@ -2002,8 +2012,8 @@ Renewal has failed to build a new certificate/key pair."
 	# Success messages
 	notice "                              * IMPORTANT *
 
-Renew was successful. To revoke the old certificate, once the new one
-has been deployed, use 'revoke-renewed $file_name_base'"
+Renew was successful. To revoke the old certificate, once the new one has
+been deployed, use 'revoke-renewed $file_name_base reason' ('reason' is optional)"
 
 	return 0
 } # => renew()
@@ -2202,12 +2212,7 @@ This process is destructive!
 These files will be moved to the 'revoked' storage sub-directory:
 * $crt_in
 * $key_in
-* $req_in
-
-These files will be DELETED:
-* All PKCS files for commonName : $file_name_base
-* The inline credentials file   : $creds_in
-* The duplicate certificate     : $duplicate_crt_by_serial"
+* $req_in"
 
 	confirm "  Continue with revocation: " "yes" "\
   Please confirm you wish to revoke the renewed certificate
@@ -2216,11 +2221,12 @@ These files will be DELETED:
   $(display_dn x509 "$crt_in")
 
   serial-number: $cert_serial
-"	# => confirm end
+
+  Reason: ${crl_reason-None given}"
 
 	# Revoke the old (already renewed) certificate
 	easyrsa_openssl ca -utf8 -revoke "$crt_in" \
-		${crl_reason:+ -crl_reason "$crl_reason"} \
+		${crl_reason+ -crl_reason "$crl_reason"} \
 		${EASYRSA_PASSIN:+ -passin "$EASYRSA_PASSIN"} \
 			|| die "Failed to revoke renewed certificate: revocation command failed."
 
@@ -2261,22 +2267,6 @@ revoke_renewed_move() {
 	if [ -e "$req_in" ]; then
 		mv "$req_in" "$req_out" || warn "Failed to move: $req_in"
 	fi
-
-	# move any pkcs files
-	for pkcs in p12 p7b p8 p1; do
-		if [ -e "$in_dir/issued/$file_name_base.$pkcs" ]; then
-			# issued
-			rm "$in_dir/issued/$file_name_base.$pkcs" ||
-				warn "Failed to remove: $file_name_base.$pkcs"
-
-		elif [ -e "$in_dir/private/$file_name_base.$pkcs" ]; then
-			# private
-			rm "$in_dir/private/$file_name_base.$pkcs" ||
-				warn "Failed to remove: $file_name_base.$pkcs"
-		else
-			: # ok
-		fi
-	done
 
 	return 0
 } # => revoke_renewed_move()
@@ -2427,134 +2417,6 @@ Serial number: $file_name_base
 
 To revoke use: 'revoke-renewed $crt_cn'"
 } # => rewind_renew()
-
-# Set certificate expire date, renew date and variables needed for fixdate
-cert_dates() {
-	if [ -e "$1" ]; then
-		# Required for renewal
-		# Call openssl directly, otherwise this is not debug compatible
-		crt_not_before="$("$EASYRSA_OPENSSL" x509 -in "$1" -noout -startdate 2>&1)" \
-			|| die "cert_dates - crt_not_before: $crt_not_before"
-		crt_not_before="${crt_not_before#*=}"
-		crt_not_after="$("$EASYRSA_OPENSSL" x509 -in "$1" -noout -enddate 2>&1)" \
-			|| die "cert_dates - crt_not_after: $crt_not_after"
-		crt_not_after="${crt_not_after#*=}"
-		shift
-	elif [ "$1" ]; then
-		# Required for status
-		crt_not_after="$1"
-	else
-		# Required for --fix-offset
-		# This is a fake date to satisfy the 'if expire_date_s' command test
-		crt_not_after="Jun 12 02:02:02 1999 GMT"
-	fi
-
-	# Set fixed dates for new certificate
-	case "$EASYRSA_FIX_OFFSET" in
-	'') : ;; # empty ok
-	*[!1234567890]*|0*) die "\
-Non-decimal value for EASYRSA_FIX_OFFSET: '$EASYRSA_FIX_OFFSET'"
-	;;
-	*)
-		# Check offset range
-		if [ 1 -gt "$EASYRSA_FIX_OFFSET" ] || [ 365 -lt "$EASYRSA_FIX_OFFSET" ]
-		then
-			die "Fixed off-set out of range [1-365 days]: $EASYRSA_FIX_OFFSET"
-		fi
-
-		# initialise fixed dates
-		unset -v start_fixdate end_fixdate
-
-		# Number of years from default (2 years) plus fixed offset
-		fix_days="$(( (EASYRSA_CERT_EXPIRE / 365) * 365 + EASYRSA_FIX_OFFSET ))"
-
-		# Current Year and seconds
-		this_year="$(date +%Y)" || die "cert_dates - this_year"
-		now_sec="$(date +%s)" || die "cert_dates - now_sec"
-	esac
-
-	# OS dependencies
-	case "$easyrsa_uname" in
-	"Darwin"|*"BSD")
-		now_sec="$(date -j +%s)"
-		expire_date="$(date -j -f '%b %d %T %Y %Z' "$crt_not_after")"
-		expire_date_s="$(date -j -f '%b %d %T %Y %Z' "$crt_not_after" +%s)"
-		allow_renew_date_s="$(( now_sec + EASYRSA_CERT_RENEW * 86400 ))"
-
-		if [ "$EASYRSA_FIX_OFFSET" ]; then
-			start_fix_sec="$(
-				date -j -f '%Y%m%d%H%M%S' "${this_year}0101000000" +%s
-				)"
-			end_fix_sec="$(( start_fix_sec + fix_days * 86400 ))"
-			# Convert to date-stamps for SSL input
-			start_fixdate="$(date -j -r "$start_fix_sec" +%Y%m%d%H%M%SZ)"
-			end_fixdate="$(date -j -r "$end_fix_sec" +%Y%m%d%H%M%SZ)"
-		fi
-	;;
-	*)
-		# Linux and Windows (FTR: date.exe does not support format +%s as input)
-		if expire_date_s="$(date -d "$crt_not_after" +%s)"
-		then
-			# Note: date.exe is Year 2038 end 32bit
-			expire_date="$(date -d "$crt_not_after")"
-			allow_renew_date_s="$(date -d "+${EASYRSA_CERT_RENEW}day" +%s)"
-
-			if [ "$EASYRSA_FIX_OFFSET" ]; then
-				# New Years Day, this year
-				New_Year_day="$(
-					date -d "${this_year}-01-01 00:00:00Z" '+%Y-%m-%d %H:%M:%SZ'
-					)"
-				# Convert to date-stamps for SSL input
-				start_fixdate="$(
-					date -d "$New_Year_day" +%Y%m%d%H%M%SZ
-					)"
-				end_fixdate="$(
-					date -d "$New_Year_day +${fix_days}days" +%Y%m%d%H%M%SZ
-					)"
-				end_fix_sec="$(
-					date -d "$New_Year_day +${fix_days}days" +%s
-					)"
-			fi
-
-		# Alpine Linux and busybox
-		elif expire_date_s="$(date -D "%b %e %H:%M:%S %Y" -d "$crt_not_after" +%s)"
-		then
-			expire_date="$(date -D "%b %e %H:%M:%S %Y" -d "$crt_not_after")"
-			allow_renew_date_s="$(( now_sec + EASYRSA_CERT_RENEW * 86400 ))"
-
-			if [ "$EASYRSA_FIX_OFFSET" ]; then
-				start_fix_sec="$(date -d "${this_year}01010000.00" +%s)"
-				end_fix_sec="$(( start_fix_sec + fix_days * 86400 ))"
-				# Convert to date-stamps for SSL input
-				start_fixdate="$(date -d @"$start_fix_sec" +%Y%m%d%H%M%SZ)"
-				end_fixdate="$(date -d @"$end_fix_sec" +%Y%m%d%H%M%SZ)"
-			fi
-
-		# Something else
-		else
-			die "Date failed"
-		fi
-	esac
-
-	# Do not generate an expired, fixed date certificate
-	if [ "$EASYRSA_FIX_OFFSET" ]; then
-		for date_stamp in "${now_sec}" "${end_fix_sec}"; do
-			case "${date_stamp}" in
-			''|*[!1234567890]*|0*)
-				die "Undefined: '$now_sec', '$end_fix_sec'"
-			;;
-			*)
-				[ "${#date_stamp}" -eq 10 ] \
-					|| die "Undefined: $now_sec, $end_fix_sec"
-			esac
-		done
-		[ "$now_sec" -lt "$end_fix_sec" ] || die "\
-The lifetime of the certificate will expire before the date today."
-		[ "$start_fixdate" ] || die "Undefined: start_fixdate"
-		[ "$end_fixdate" ] || die "Undefined: end_fixdate"
-		unset -v crt_not_after
-	fi
-} # => cert_dates()
 
 # gen-crl backend
 gen_crl() {
@@ -3044,9 +2906,260 @@ OpenSSL failure to process the input"
 	[ "$EASYRSA_SILENT" ] || print # Separate certificate above
 } # => show_ca()
 
+# Set fixed offset dates
+fixed_cert_dates() {
+	# Set the start fixed day-number of the Year
+	start_fix_day_n="$1"
+
+	# Check offset is numeric
+	case "$start_fix_day_n" in
+	(''|*[!1234567890]*|0*)
+		die "fixed_cert_dates - Number expected: $start_fix_day_n"
+	esac
+
+	# Check offset range
+	if [ 1 -gt "$start_fix_day_n" ] || [ 365 -lt "$start_fix_day_n" ]
+	then
+		die "Fixed off-set out of range [1-365 days]: $start_fix_day_n"
+	fi
+
+	# Set the end fixed day-number of the Year
+	end_fix_day_n="$(( start_fix_day_n + EASYRSA_CERT_EXPIRE ))"
+
+	# OS dependencies
+
+	# busybox - Works best with seconds since epoch
+	# busybox can probably do this better, this was writen for 'date'
+	if busybox date --help > /dev/null 2>&1; then
+
+		this_year_n="$(busybox date -u +%y)"
+		today_n="$(busybox date -u +%j)"
+
+		# If the start day number is into the future then back-date by one year
+		if [ "$start_fix_day_n" -gt "$today_n" ]; then
+			not_valid_until_d="$(( start_fix_day_n - today_n ))"
+			this_year_n="$(( this_year_n - 1 ))"
+			# Get user confirmation
+			# This needs to be less rigid ;-)
+			confirm "  Create certificate with one year back-dated date ? " \
+				"yes" "\
+This certificate will not be valid for '${not_valid_until_d} days'.
+The fixed date will be rolled backward by one year."
+		fi
+
+		New_Year_day_s="$(
+			busybox date -u -d "${this_year_n}01010000.01" '+%s'
+			)"
+
+		start_fix_day_s="$(( New_Year_day_s + start_fix_day_n * 86400 ))"
+		end_fix_day_s="$(( start_fix_day_s + EASYRSA_CERT_EXPIRE * 86400 ))"
+
+		# Convert to date-stamps for SSL input
+		start_fix_day_d="$(
+			busybox date -u -d @"${start_fix_day_s}" +%Y%m%d%H%M%SZ
+			)"
+		end_fix_day_d="$(
+			busybox date -u -d @"${end_fix_day_s}" +%Y%m%d%H%M%SZ
+			)"
+
+	# Darwin, BSD
+	elif date -j > /dev/null 2>&1; then
+
+		this_year_n="$(date -j +%y)"
+		today_n="$(date -u -j +%j)"
+
+		# If the start day number is into the future then back-date by one year
+		if [ "$start_fix_day_n" -gt "$today_n" ]; then
+			not_valid_until_d="$(( start_fix_day_n - today_n ))"
+			this_year_n="$(( this_year_n - 1 ))"
+			# Get user confirmation
+			confirm "  Create certificate with one year back-dated date ? " \
+				"yes" "\
+This certificate will not be valid for ${not_valid_until_d} days.
+The fixed date will be rolled backward by one year."
+		fi
+
+		New_Year_day_d="$(
+			date -u -j -f %y%m%d%H%M%S "${this_year_n}0101000001" \
+				+%Y%m%d%H%M.%SZ
+			)"
+
+		# Convert to date-stamps for SSL input
+		start_fix_day_d="$(
+			date -u -j -f %Y%m%d%H%M.%SZ -v "+${start_fix_day_n}d" \
+				"$New_Year_day_d" +%Y%m%d%H%M%SZ
+			)"
+		end_fix_day_d="$(
+			date -u -j -f %Y%m%d%H%M.%SZ -v "+${end_fix_day_n}d" \
+				"$New_Year_day_d" +%Y%m%d%H%M%SZ
+			)"
+		end_fix_day_s="$(
+			date -u -j -f %Y%m%d%H%M.%SZ -v "+${end_fix_day_n}d" \
+				"$New_Year_day_d" +%s
+			)"
+
+	# Linux and Windows
+	# Windows date.exe does not support format +%s as input
+	# MacPorts GNU date
+	elif this_year_n="$(date -u +%y)"; then
+
+		# Day of Year number today
+		today_n="$(date -u +%j)"
+
+		# If the start day number is into the future then back-date by one year
+		if [ "$start_fix_day_n" -gt "$today_n" ]; then
+			not_valid_until_d="$(( start_fix_day_n - today_n ))"
+			this_year_n="$(( this_year_n - 1 ))"
+			# Get user confirmation
+			confirm "  Create certificate with one year back-dated date ? " \
+				"yes" "\
+This certificate will not be valid for ${not_valid_until_d} days.
+The fixed date will be rolled backward by one year."
+		fi
+
+		# New Years day date
+		New_Year_day_d="$(
+			date -u -d "${this_year_n}-01-01 00:00:01Z" '+%Y-%m-%d %H:%M:%SZ'
+			)"
+
+		# Convert to date-stamps for SSL input
+		start_fix_day_d="$(
+			date -u -d "$New_Year_day_d +${start_fix_day_n}days" +%Y%m%d%H%M%SZ
+			)"
+		end_fix_day_d="$(
+			date -u -d "$New_Year_day_d +${end_fix_day_n}days" +%Y%m%d%H%M%SZ
+			)"
+		end_fix_day_s="$(
+			date -u -d "$New_Year_day_d +${end_fix_day_n}days" +%s
+			)"
+
+	else
+		die "Unsupported 'date' program, upgrade your Matrix."
+	fi
+
+	# Return FINAL dates for use in the certificate
+	print "$start_fix_day_d $end_fix_day_d"
+} # => fixed_cert_dates()
+
+# Convert certificate date to timestamp seconds since epoch
+cert_date_to_timestamp_s() {
+
+	in_date="$1"
+
+	# busybox
+	if busybox date --help > /dev/null 2>&1
+	then
+		timestamp_s="$(
+			date -D "%b %e %H:%M:%S %Y" -d "$in_date" +%s \
+				2>/dev/null
+			)"
+		return
+
+	# Darwin, BSD
+	elif timestamp_s="$(
+		date -j -f '%b %d %T %Y %Z' "$in_date" +%s \
+			2>/dev/null
+		)"
+	then return
+
+	# OS dependencies
+	# Linux and Windows (FTR: date.exe does not support format +%s as input)
+	# MacPorts GNU date
+	elif timestamp_s="$(
+		date -d "$in_date" +%s \
+			2>/dev/null
+		)"
+	then return
+
+	# Something else
+	else
+		die "\
+cert_date_to_timestamp_s:
+'date' failed for 'in_date': $in_date"
+	fi
+} # => cert_date_to_timestamp_s()
+
+# Convert system date/time to X509 certificate style date/time (+)offset
+# TODO minus (-)offset
+offset_days_to_cert_date() {
+
+	offset="$1"
+
+	# busybox (Alpine)
+	if busybox date --help > /dev/null 2>&1
+	then
+		cert_type_date="$(
+			date -u -d "@$(( $(date +%s) + offset * 86400 ))" \
+				"+%b %d %H:%M:%S %Y %Z" \
+				2>/dev/null
+			)"
+		return
+
+	# Darwin, BSD
+	elif cert_type_date="$(
+		date -u -j -v "+${offset}d" "+%b %d %H:%M:%S %Y %Z" \
+			2>/dev/null
+		)"
+	then return
+
+	# OS dependencies
+	# Linux and Windows (FTR: date.exe does not support format +%s as input)
+	# MacPorts GNU date
+	elif cert_type_date="$(
+		date -u -d "+${offset}days" "+%b %d %H:%M:%S %Y %Z" \
+			2>/dev/null
+		)"
+	then return
+
+	# Something else
+	else
+		die "\
+offset_days_to_cert_date:
+'date' failed for 'offset': $offset"
+	fi
+} # => offset_days_to_cert_date()
+
+# Convert fixed format date to X509 certificate style date
+ff_date_to_cert_date() {
+
+	in_date="$1"
+
+	# busybox
+	if busybox date --help > /dev/null 2>&1
+	then
+		cert_type_date="$(
+		date -u -D "%b %e %H:%M:%S %Y" -d "$in_date" "+%b %d %H:%M:%S %Y %Z" \
+			2>/dev/null
+		)"
+		return
+
+	# Darwin, BSD
+	elif cert_type_date="$(
+		date -u -j -f '%y-%m-%d %TZ' "$in_date" "+%b %d %H:%M:%S %Y %Z" \
+			2>/dev/null
+		)"
+	then return
+
+	# OS dependencies
+	# Linux and Windows (FTR: date.exe does not support format +%s as input)
+	# MacPorts GNU date
+	elif cert_type_date="$(
+		date -u -d "$in_date" "+%b %d %H:%M:%S %Y %Z" \
+			2>/dev/null
+		)"
+	then return
+
+	# Something else
+	else
+		die "\
+ff_date_to_cert_date:
+'date' failed for 'in_date': $in_date"
+	fi
+} # => ff_date_to_cert_date()
+
 # Fixed format date
 # Build a Windows date.exe compatible input field
-build_ff_date_string() {
+db_date_to_ff_date() {
 	unset -v ff_date
 	ff_date="$1"
 	[ "$ff_date" ] || die "ff_date: '$ff_date'"
@@ -3064,7 +3177,29 @@ build_ff_date_string() {
 	ff_date="${ff_date#"$SS"}"
 	TZ="$ff_date"
 	ff_date="${yy}-${mm}-${dd} ${HH}:${MM}:${SS}${TZ}"
-} # => build_date_string()
+} # => build_ff_date_string()
+
+# Get certificate start date
+ssl_cert_not_before_date() {
+	[ "$1" ] || die "ssl_cert_not_before_date - Invalid input"
+	unset -v ssl_out cert_not_before_date
+	ssl_out="$("$EASYRSA_OPENSSL" x509 -in "$1" -noout -startdate)" \
+		|| die "ssl_cert_not_before_date - ssl_out: $ssl_out"
+	# 'cert_not_before_date' is *not* used, at this time..
+	# disable #shellcheck disable=SC2034 # Prefer to keep the warning
+	cert_not_before_date="${ssl_out#*=}"
+	unset -v ssl_out
+} # => ssl_cert_not_before_date()
+
+# Get certificate end date
+ssl_cert_not_after_date() {
+	[ "$1" ] || die "ssl_cert_not_after_date - Invalid input"
+	unset -v ssl_out cert_not_after_date
+	ssl_out="$("$EASYRSA_OPENSSL" x509 -in "$1" -noout -enddate)" \
+		|| die "ssl_cert_not_after_date - ssl_out: $ssl_out"
+	cert_not_after_date="${ssl_out#*=}"
+	unset -v ssl_out
+} # => ssl_cert_not_after_date()
 
 # SC2295: (info): Expansions inside ${..} need to be quoted separately,
 # otherwise they match as patterns. (what-ever that means .. ;-)
@@ -3085,7 +3220,8 @@ read_db() {
 			db_serial="${db_record%%${TCT}*}"
 			db_record="${db_record#*${TCT}}"
 			db_cn="${db_record#*/CN=}"; db_cn="${db_cn%%/*}"
-			crt_file="$EASYRSA_PKI/issued/$db_cn.crt"
+			cert_issued="$EASYRSA_PKI/issued/$db_cn.crt"
+			cert_renewed="$EASYRSA_PKI/renewed/issued/$db_cn.crt"
 		;;
 		R)	# Revoked
 			db_revoke_date="${db_record%%${TCT}*}"
@@ -3138,72 +3274,87 @@ read_db() {
 
 # Expire status
 expire_status() {
-	crt_file="$EASYRSA_PKI/issued/$db_cn.crt"
-	if [ -e "$crt_file" ]; then
-		# Use cert date
-		cert_dates "$crt_file"
+	if [ -e "$cert_issued" ]; then
+
+		# get the serial number of the certificate
+		cert_serial="$(easyrsa_openssl x509 -in "$cert_issued" -noout -serial)"
+		cert_serial="${cert_serial##*=}"
+
+		# db serial must match certificate serial, otherwise this
+		# should be a renewed cert, which index.txt cannot differentiate
+		[ "$db_serial" = "$cert_serial" ] || return 0
+
+		#cert_source=issued
+		ssl_cert_not_after_date "$cert_issued" # Assigns cert_not_after_date
+
 	else
 		# Translate db date to usable date
-		build_ff_date_string "$db_notAfter"
-		db_notAfter="$ff_date"
+		#cert_source=database
+		db_date_to_ff_date "$db_notAfter" # Assigns ff_date
+		ff_date_to_cert_date "$ff_date" # Assigns cert_type_date
 		# Use db translated date
-		cert_dates "$db_notAfter"
+		cert_not_after_date="$cert_type_date"
 	fi
 
-	if [ "$expire_date_s" -lt "$allow_renew_date_s" ]; then
+	# Get timestamp seconds for certificate expiry date
+	cert_date_to_timestamp_s "$cert_not_after_date" # Assigns timestamp_s
+	cert_expire_date_s="$timestamp_s"
+
+	# Set the cutoff date for expiry comparison
+	offset_days_to_cert_date "$EASYRSA_CERT_RENEW" # Assigns cert_type_date
+	cert_date_to_timestamp_s "$cert_type_date" # Assigns timestamp_s
+	cutoff_date_s="$timestamp_s"
+
+	if [ "$cert_expire_date_s" -lt "$cutoff_date_s" ]; then
 		# Cert expires in less than grace period
 		printf '%s%s\n' "$db_status | Serial: $db_serial | " \
-			"Expires: $expire_date | CN: $db_cn"
+			"Expires: $cert_not_after_date | CN: $db_cn"
 	fi
 } # => expire_status()
 
 # Revoke status
 revoke_status() {
 	# Translate db date to usable date
-	build_ff_date_string "$db_revoke_date"
-	db_revoke_date="$ff_date"
+	#source_date=database
+	db_date_to_ff_date "$db_revoke_date" # Assigns ff_date
+	ff_date_to_cert_date "$ff_date" # Assigns cert_type_date
 	# Use db translated date
-	# ff db_revoke_date returns db_revoke_date as full expire_date
-	cert_dates "$db_revoke_date"
-	crt_revoke_date="$expire_date"
+	cert_revoke_date="$cert_type_date"
 
 	printf '%s%s\n' "$db_status | Serial: $db_serial | " \
-		"Revoked: $crt_revoke_date | Reason: $db_reason | CN: $db_cn"
+		"Revoked: $cert_revoke_date | Reason: $db_reason | CN: $db_cn"
 } # => revoke_status()
 
 # Renewed status
 # renewed certs only remain in the renewed folder until they are revoked
 # Only ONE renewed cert with unique CN can exist in the renewed folder
 renew_status() {
-	build_ff_date_string "$db_notAfter"
-
 	# Does a Renewed cert exist ?
-	crt_file="$EASYRSA_PKI/renewed/issued/${db_cn}.crt"
-	if [ -e "$crt_file" ]; then
+	if [ -e "$cert_renewed" ]; then
+
+		# get the serial number of the certificate
+		cert_serial="$(easyrsa_openssl x509 -in "$cert_renewed" -noout -serial)"
+		cert_serial="${cert_serial##*=}"
+
+		# db serial must match certificate serial, otherwise this
+		# should be an issued cert, which index.txt cannot differentiate
+		[ "$db_serial" = "$cert_serial" ] || return 0
+
 		# Use cert date
-		cert_dates "$crt_file"
+		ssl_cert_not_after_date "$cert_renewed" # Assigns cert_not_after_date
 
-		# get the serial number of the certificate -> serial=XXXX
-		renewed_crt_serial="$(easyrsa_openssl x509 -in "$crt_file" -noout -serial)"
-		# remove the serial= part -> we only need the XXXX part
-		renewed_crt_serial="${renewed_crt_serial##*=}"
+		printf '%s%s\n' "$db_status | Serial: $db_serial | " \
+			"Expires: $cert_not_after_date | CN: $db_cn"
 
-		# db serial must match certificate serial
-		if [ "$db_serial" = "$renewed_crt_serial" ]; then
-			printf '%s%s\n' "$db_status | Serial: $db_serial | " \
-				"Expires: $crt_not_after | CN: $db_cn"
-		else
-			# Cert is valid, this is the replacement cert from renewal
-			: # ok - ignore
-		fi
 	else
-		# Cert is valid but no renewed cert exists or it has been revoked
+		# Cert is valid but not renewed
 		: # ok - ignore
 	fi
 } # => renew_status()
 
 # cert status reports
 status() {
+
 	[ "$#" -gt 0 ] || die "status - Incorrect input parameters"
 	report="$1"
 	target="$2"
@@ -3211,32 +3362,26 @@ status() {
 	verify_ca_init
 
 	# This does not build certs, so do not need support for fixed dates
-	unset -v EASYRSA_FIX_OFFSET
+	unset -v EASYRSA_FIX_OFFSET EASYRSA_BATCH EASYRSA_SILENT
 
 	# If no target file then add Notice
 	if [ -z "$target" ]; then
 		# Select correct Notice
 		case "$report" in
 		expire)
-				[ "$EASYRSA_SILENT" ] || notice "\
+			notice "\
 * Showing certificates which expire in less than $EASYRSA_CERT_RENEW days (--renew-days):"
 		;;
 		revoke)
-			[ "$EASYRSA_SILENT" ] || notice "\
+			notice "\
 * Showing certificates which are revoked:"
 		;;
 		renew)
-			[ "$EASYRSA_SILENT" ] || notice "\
+			notice "\
 * Showing certificates which have been renewed but NOT revoked:"
 		;;
 		*) warn "Unrecognised report: $report"
 		esac
-	else
-		# get status for a single cert - Verify cert first
-		in_crt="$EASYRSA_PKI/issued/$target.crt"
-		[ -e "$in_crt" ] || die "File not found: $in_crt"
-		format="x509"
-		verify_file "$format" "$in_crt"
 	fi
 
 	# Create report
@@ -3332,6 +3477,17 @@ detect_host() {
 	host_out="${host_out}${easyrsa_win_git_bash+ | "$easyrsa_win_git_bash"}"
 	unset -v easyrsa_ver_test easyrsa_host_test
 } # => detect_host()
+
+# Extra diagnostics
+show_host() {
+	print_version
+	print "$host_out | ${ssl_lib:-ssl_lib not set}"
+	case "$easyrsa_host_os" in
+	win) set ;;
+	nix) env ;;
+	*) print "Unknown host OS: $easyrsa_host_os"
+	esac
+} # => show_host()
 
 # Verify the selected algorithm parameters
 verify_algo_params() {
@@ -3503,11 +3659,10 @@ recommended - please remove it from there before continuing."
 						-e "EASYRSA_REQ_EMAIL" \
 						-e "EASYRSA_REQ_OU" |
 					grep \
-						 -e '`' -e '{' -e '}'
+						-q -e '`' -e '$' -e '{' -e '}'
 				then
-					warn '\
-Unsupported  characters are present in the vars file.
-These characters are not supported: (\`) ({) (})
+					warn 'Unsupported characters are present in the vars file.
+These characters are not supported: (`) "$" "{" "}"
 Sourcing the vars file and building certificates will probably fail ..'
 				fi
 			fi
@@ -3518,7 +3673,7 @@ Sourcing the vars file and building certificates will probably fail ..'
 
 			# Test souring 'vars' in a subshell
 			# shellcheck disable=1090 # can't follow non-constant source. vars
-			( . "$vars" 2>/dev/null ) || die "\
+			( . "$vars" ) || die "\
 Failed to source the vars file, remove any unsupported characters."
 
 			# Source 'vars' now
@@ -3570,16 +3725,20 @@ Move your vars file to your PKI folder, where it is safe!"
 	# For commands which 'require a PKI' and the PKI exists
 	if  [ "$pki_is_required" ] && [ -d "$EASYRSA_PKI" ]; then
 
+		# Verify SSL Lib - One time ONLY
+		verify_ssl_lib
+
 		# Make a safe SSL config for LibreSSL
-		# Must specify 'no_pki_required' and 'require_safe_ssl_conf' here
-		# because verify_ssl_lib() has not yet run
+		# Must specify 'no_pki_required' here, otherwise temp-files cannot
+		# be created because secure_session has not created a temp-dir
 		{	# Scope conditions to this single command
-			no_pki_required=1 require_safe_ssl_conf=1 \
-				easyrsa_openssl makesafeconf || \
-					die "Failed to create safe ssl conf (vars_setup)"
+			no_pki_required=1 easyrsa_openssl makesafeconf || \
+				die "Failed to create safe ssl conf (vars_setup)"
 		} # End scope
 
 		# mkdir Temp dir session
+		# Must be run after 'Make a safe SSL config for LibreSSL' above,
+		# otherwise LibreSSL chokes without a safe config file
 		secure_session || die "Temporary directory secure-session failed."
 
 		if [ -d "$EASYRSA_TEMP_DIR" ]; then
@@ -4229,7 +4388,8 @@ Version:     $EASYRSA_version
 Generated:   ~DATE~
 SSL Lib:     $ssl_version
 Git Commit:  ~GITHEAD~
-Source Repo: https://github.com/OpenVPN/easy-rsa
+Source Repo: https://github.com/OpenVPN/easy-rsa${EASYRSA_DEBUG+
+* debug enabled}
 VERSION_TEXT
 } # => print_version ()
 
@@ -4243,6 +4403,19 @@ NL='
 
 # Be secure with a restrictive umask
 [ "$EASYRSA_NO_UMASK" ] || umask "${EASYRSA_UMASK:-077}"
+
+# Register cleanup on EXIT
+trap "cleanup" EXIT
+# When SIGHUP, SIGINT, SIGQUIT, SIGABRT and SIGTERM,
+# explicitly exit to signal EXIT (non-bash shells)
+trap "exit 1" 1
+trap "exit 2" 2
+trap "exit 3" 3
+trap "exit 6" 6
+trap "exit 14" 15
+
+# Get host details - does not require vars_setup
+detect_host
 
 # Initialisation requirements
 unset -v easyrsa_error_exit user_san_true user_vars_true
@@ -4265,11 +4438,28 @@ while :; do
 		export EASYRSA_CERT_EXPIRE="$val"
 		export EASYRSA_CA_EXPIRE="$val"
 		export EASYRSA_CRL_DAYS="$val"
+		case "$EASYRSA_CERT_EXPIRE" in
+		(*[!1234567890]*|0*)
+			print "--days - Number expected: $EASYRSA_CERT_EXPIRE"
+			exit 1
+		esac
 		;;
 	--fix-offset)
-		export EASYRSA_FIX_OFFSET="$val" ;;
+		export EASYRSA_FIX_OFFSET="$val"
+		case "$EASYRSA_FIX_OFFSET" in
+		(*[!1234567890]*|0*)
+			print "--fix-offset - Number expected: $EASYRSA_FIX_OFFSET"
+			exit 1
+		esac
+		;;
 	--renew-days)
-		export EASYRSA_CERT_RENEW="$val" ;;
+		export EASYRSA_CERT_RENEW="$val"
+		case "$EASYRSA_CERT_RENEW" in
+		(*[!1234567890]*|0*)
+			print "--renew-days - Number expected: $EASYRSA_CERT_RENEW"
+			exit 1
+		esac
+		;;
 	--pki-dir)
 		export EASYRSA_PKI="$val" ;;
 	--tmp-dir)
@@ -4337,7 +4527,8 @@ while :; do
 		user_san_true=1
 		export EASYRSA_EXTRA_EXTS="\
 $EASYRSA_EXTRA_EXTS
-subjectAltName = $val" ;;
+subjectAltName = $val"
+		;;
 	--version)
 		shift "$#"
 		set -- "$@" "version"
@@ -4354,19 +4545,6 @@ subjectAltName = $val" ;;
 
 	shift
 done
-
-# Register cleanup on EXIT
-trap "cleanup" EXIT
-# When SIGHUP, SIGINT, SIGQUIT, SIGABRT and SIGTERM,
-# explicitly exit to signal EXIT (non-bash shells)
-trap "exit 1" 1
-trap "exit 2" 2
-trap "exit 3" 3
-trap "exit 6" 6
-trap "exit 14" 15
-
-# Get host details - does not require vars_setup
-detect_host
 
 # Set cmd now because vars_setup needs to know if this is init-pki
 cmd="$1"
@@ -4481,6 +4659,9 @@ case "$cmd" in
 		;;
 	show-renew)
 		status renew "$@"
+		;;
+	show-host)
+		show_host "$@"
 		;;
 	make-safe-ssl)
 		make_safe_ssl_copy "$@"
