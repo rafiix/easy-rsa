@@ -95,9 +95,12 @@ possible terse description is shown below:
  *  `EASYRSA_REQ_EMAIL` (CLI: `--req-email`) - set the DN email with org mode
  *  `EASYRSA_REQ_OU` (CLI: `--req-ou`) - set the DN organizational unit with org
     mode
+ *  `EASYRSA_REQ_SERIAL` (CLI: `--req-serial`) - set the DN serialNumber with
+    org mode (OID 2.5.4.5)
  *  `EASYRSA_KEY_SIZE` (CLI: `--keysize`) - set the key size in bits to
     generate
- *  `EASYRSA_ALGO` (CLI: `--use-algo`) - set the crypto alg to use: rsa or ec
+ *  `EASYRSA_ALGO` (CLI: `--use-algo`) - set the crypto alg to use: rsa, ec or
+    ed
  *  `EASYRSA_CURVE` (CLI: `--curve`) - define the named EC curve to use
  *  `EASYRSA_EC_DIR` - dir to store generated ecparams
  *  `EASYRSA_CA_EXPIRE` (CLI: `--days`) - set the CA expiration time in days
@@ -110,7 +113,7 @@ possible terse description is shown below:
     using the deprecated Netscape extensions
  *  `EASYRSA_TEMP_FILE` - a temp file to use when dynamically creating req/cert
     extensions
- *  `EASYRSA_REQ_CN` (CLI: `--req-cn`) - default CN, necessary to set in BATCH
+ *  `EASYRSA_REQ_CN` (CLI: `--req-cn`) - default CN, can only be used in BATCH
     mode
  *  `EASYRSA_DIGEST` (CLI: `--digest`) - set a hash digest to use for req/cert
     signing
